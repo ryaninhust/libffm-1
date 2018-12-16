@@ -79,6 +79,7 @@ inline ffm_float wTx(
     ffm_float kappa=0, 
     ffm_float eta=0, 
     ffm_float lambda=0, 
+    ffm_int *freqs = nullptr,
     bool do_update=false) {
 
     ffm_int align0 = 2 * get_k_aligned(model.k);
@@ -113,6 +114,12 @@ inline ffm_float wTx(
 
             if(do_update)
             {
+                __m128 XMMfreq1 = _mm_set1_ps(freqs[f1]);
+                __m128 XMMfreq2 = _mm_set1_ps(freqs[f2]);
+
+                __m128 XMMreg1 = _mm_mul_ps(XMMfreq1, XMMlambda);
+                __m128 XMMreg2 = _mm_mul_ps(XMMfreq2, XMMlambda);
+
                 __m128 XMMkappav = _mm_mul_ps(XMMkappa, XMMv);
 
                 for(ffm_int d = 0; d < align0; d += kALIGN * 2)
@@ -130,10 +137,10 @@ inline ffm_float wTx(
                     __m128 XMMwg2 = _mm_load_ps(wg2);
 
                     __m128 XMMg1 = _mm_add_ps(
-                                   _mm_mul_ps(XMMlambda, XMMw1),
+                                   _mm_mul_ps(XMMreg1, XMMw1),
                                    _mm_mul_ps(XMMkappav, XMMw2));
                     __m128 XMMg2 = _mm_add_ps(
-                                   _mm_mul_ps(XMMlambda, XMMw2),
+                                   _mm_mul_ps(XMMreg2, XMMw2),
                                    _mm_mul_ps(XMMkappav, XMMw1));
 
                     XMMwg1 = _mm_add_ps(XMMwg1, _mm_mul_ps(XMMg1, XMMg1));
@@ -186,6 +193,7 @@ inline ffm_float wTx(
     ffm_float kappa=0, 
     ffm_float eta=0, 
     ffm_float lambda=0, 
+    ffm_int* freqs=nullptr,
     bool do_update=false) {
 
     ffm_int align0 = 2 * get_k_aligned(model.k);
@@ -216,8 +224,8 @@ inline ffm_float wTx(
                 ffm_float *wg2 = w2 + kALIGN;
                 for(ffm_int d = 0; d < align0; d += kALIGN * 2)
                 {
-                    ffm_float g1 = lambda * w1[d] + kappa * w2[d] * v;
-                    ffm_float g2 = lambda * w2[d] + kappa * w1[d] * v;
+                    ffm_float g1 = lambda*freqs[f1] * w1[d] + kappa * w2[d] * v;
+                    ffm_float g2 = lambda*freqs[f2] * w2[d] + kappa * w1[d] * v;
 
                     wg1[d] += g1 * g1;
                     wg2[d] += g2 * g2;
@@ -294,6 +302,7 @@ ffm_model init_model(ffm_int n, ffm_int m, ffm_parameter param)
 
     return model;
 }
+
 
 struct disk_problem_meta {
     ffm_int n = 0;
@@ -529,12 +538,38 @@ void ffm_read_problem_to_disk(string txt_path, string bin_path) {
     }
 }
 
+void count_feat_freq(problem_on_disk &prob, vector<ffm_int> &freqs)
+{
+    vector<ffm_int> outer_order(prob.meta.num_blocks);
+    iota(outer_order.begin(), outer_order.end(), 0);
+    for(auto blk : outer_order) {
+        ffm_int l = prob.load_block(blk);
+        for(ffm_int i = 0; i < l; i++) {
+            ffm_node *begin = &prob.X[prob.P[i]];
+            ffm_node *end = &prob.X[prob.P[i+1]];
+            for(ffm_node *N1 = begin; N1 != end; N1++) {
+                ffm_int f1 = N1->f;
+                freqs[f1]++;
+            }
+        }
+    }
+    for (ffm_int f1 = 0; f1 < ffm_int(freqs.size()); f1++)
+    {
+        if (!freqs[f1])
+            continue;
+        freqs[f1] = 1/freqs[f1];
+    }
+}
+
 ffm_model ffm_train_on_disk(string tr_path, string va_path, ffm_parameter param) {
 
     problem_on_disk tr(tr_path);
     problem_on_disk va(va_path);
 
     ffm_model model = init_model(tr.meta.n, tr.meta.m, param);
+
+    vector<ffm_int> freqs(tr.meta.n, 0);
+    count_feat_freq(tr, freqs);
 
     bool auto_stop = param.auto_stop && !va_path.empty();
 
@@ -597,7 +632,7 @@ ffm_model ffm_train_on_disk(string tr_path, string va_path, ffm_parameter param)
                    
                     ffm_float kappa = -y*expnyt/(1+expnyt);
 
-                    wTx(begin, end, r, model, kappa, param.eta, param.lambda, true);
+                    wTx(begin, end, r, model, kappa, param.eta, param.lambda, freqs.data(), true);
                 }
             }
         }
